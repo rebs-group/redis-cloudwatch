@@ -7,6 +7,8 @@ This is intended to run on an Amazon EC2 instance and requires a boto config
 '''
 
 import redis
+import os
+
 from boto.ec2 import cloudwatch
 from boto.utils import get_instance_metadata
 
@@ -49,47 +51,54 @@ command_groups = {
     'ScriptBasedCmds': ['eval','evalsha']
 }
 
-def collect_redis_info():
-    r = redis.StrictRedis('localhost', port=6379, db=0)
+def env(name, default=None):
+    return os.environ.get(name, default)
+
+def collect_redis_info(host, db=0):
+    r = redis.StrictRedis(host, port=6379, db=db)
     info = r.info()
     cmd_info = r.info('commandstats')
 
     return dict(info.items() + cmd_info.items())
 
-def send_multi_metrics(instance_id, region, metrics, unit='Count', namespace='EC2/Redis'):
+def send_multi_metrics(instance_id, region, metrics, dimensions, unit='Count', namespace='EC2/Redis'):
     cw = cloudwatch.connect_to_region(region)
     cw.put_metric_data(namespace, metrics.keys(), metrics.values(),
-        unit=unit, dimensions={"InstanceId": instance_id})
+        unit=unit, dimensions=dimensions)
 
 if __name__ == '__main__':
     metadata = get_instance_metadata()
     instance_id = metadata['instance-id']
     region = metadata['placement']['availability-zone'][0:-1]
-    redis_data = collect_redis_info()
+    host = env('REDIS_HOST', 'localhost')
+    dbs = [int(db) for db in env('REDIS_DBS', '0').split(',')]
+    for db in dbs:
+      dimensions = {'db': db}
+      redis_data = collect_redis_info(host, db)
 
-    count_metrics = {
-        'CurrConnections': redis_data['connected_clients'],
-        'Evictions': redis_data['evicted_keys'],
-        'Reclaimed': redis_data['expired_keys'],
-        'CacheHits': redis_data['keyspace_hits'],
-        'CacheMisses': redis_data['keyspace_misses'],
-        'UsedMemory': redis_data['used_memory'],
-        'IOPS': redis_data['instantaneous_ops_per_sec'],
-        'InputKbps': redis_data['instantaneous_input_kbps'],
-        'OutputKbps': redis_data['instantaneous_output_kbps'],
-        'CurrItems': redis_data['db0']['keys']
-    }
+      count_metrics = {
+          'CurrConnections': redis_data['connected_clients'],
+          'Evictions': redis_data['evicted_keys'],
+          'Reclaimed': redis_data['expired_keys'],
+          'CacheHits': redis_data['keyspace_hits'],
+          'CacheMisses': redis_data['keyspace_misses'],
+          'UsedMemory': redis_data['used_memory'],
+          'IOPS': redis_data['instantaneous_ops_per_sec'],
+          'InputKbps': redis_data['instantaneous_input_kbps'],
+          'OutputKbps': redis_data['instantaneous_output_kbps'],
+          'CurrItems': redis_data['db0']['keys']
+      }
 
-    for command_group, commands in command_groups.items():
-        count_metrics[command_group] = 0
-        for command in commands:
-            key = 'cmdstat_' + command
-            if key in redis_data:
-                count_metrics[command_group] += redis_data[key]['calls']
+      for command_group, commands in command_groups.items():
+          count_metrics[command_group] = 0
+          for command in commands:
+              key = 'cmdstat_' + command
+              if key in redis_data:
+                  count_metrics[command_group] += redis_data[key]['calls']
 
-    byte_metrics = {
-        'BytesUsedForCache': redis_data['used_memory'],
-    }
+      byte_metrics = {
+          'BytesUsedForCache': redis_data['used_memory'],
+      }
 
-    send_multi_metrics(instance_id, region, count_metrics)
-    send_multi_metrics(instance_id, region, byte_metrics, 'Bytes')
+      send_multi_metrics(instance_id, region, count_metrics, dimensions)
+      send_multi_metrics(instance_id, region, byte_metrics, dimensions, unit='Bytes')
