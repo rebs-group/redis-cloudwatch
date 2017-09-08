@@ -73,7 +73,7 @@ if __name__ == '__main__':
     host = env('REDIS_HOST', 'localhost')
     dbs = [int(db) for db in env('REDIS_DBS', '0').split(',')]
     for db in dbs:
-      dimensions = {'db': db}
+      dimensions = {'db': str(db)}
       redis_data = collect_redis_info(host, db)
 
       count_metrics = {
